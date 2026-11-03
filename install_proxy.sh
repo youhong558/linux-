@@ -1,8 +1,8 @@
 #!/bin/bash
 # ============================================================
-#  Reality + Hysteria2 一键安装脚本 v2
+#  Reality + Hysteria2 一键安装脚本 v3
 #  适用系统: Debian 12
-#  修正: Hysteria2 证书先于配置生成，权限正确设置，BBR 自动开启
+#  v3: 自定义节点名称 + 自动生成 Clash Verge (mihomo) 配置
 # ============================================================
 
 RED='\033[0;31m'
@@ -101,6 +101,9 @@ configure_reality() {
     read -rp "监听端口 [默认随机]: " REALITY_PORT
     [[ -z "$REALITY_PORT" ]] && REALITY_PORT=$(random_port 10000 50000)
 
+    read -rp "节点名称 [默认 Reality]: " REALITY_NAME
+    [[ -z "$REALITY_NAME" ]] && REALITY_NAME="Reality"
+
     read -rp "伪装域名 [默认 www.microsoft.com]: " REALITY_DEST
     [[ -z "$REALITY_DEST" ]] && REALITY_DEST="www.microsoft.com"
 
@@ -173,8 +176,26 @@ SNI      : ${REALITY_SNI}
 Flow     : xtls-rprx-vision
 EOF
 
-    local SHARE_LINK="vless://${REALITY_UUID}@${SERVER_IP}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${REALITY_SID}&type=tcp#Reality-$(date +%m%d)"
+    local SHARE_LINK="vless://${REALITY_UUID}@${SERVER_IP}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${REALITY_SID}&type=tcp#${REALITY_NAME}"
     echo "$SHARE_LINK" >> /root/reality_info.txt
+
+    # Clash 节点片段
+    cat > /root/clash_reality.part <<CEOF
+  - name: "${REALITY_NAME}"
+    type: vless
+    server: ${SERVER_IP}
+    port: ${REALITY_PORT}
+    uuid: ${REALITY_UUID}
+    network: tcp
+    udp: true
+    tls: true
+    flow: xtls-rprx-vision
+    servername: ${REALITY_SNI}
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: ${REALITY_PUBLIC}
+      short-id: ${REALITY_SID}
+CEOF
 
     echo ""
     cat /root/reality_info.txt
@@ -212,6 +233,9 @@ configure_hysteria2() {
 
     read -rp "监听端口 [默认随机]: " HY2_PORT
     [[ -z "$HY2_PORT" ]] && HY2_PORT=$(random_port 20000 59999)
+
+    read -rp "节点名称 [默认 Hysteria2]: " HY2_NAME
+    [[ -z "$HY2_NAME" ]] && HY2_NAME="Hysteria2"
 
     read -rp "认证密码 [默认随机生成]: " HY2_PASSWORD
     [[ -z "$HY2_PASSWORD" ]] && HY2_PASSWORD=$(openssl rand -base64 16 | tr -d '=+/')
@@ -330,11 +354,28 @@ EOF
 
     local SHARE_LINK
     if [[ "$CERT_MODE" == "2" ]]; then
-        SHARE_LINK="hysteria2://${HY2_PASSWORD}@${HY2_DOMAIN}:${HY2_PORT}?sni=${HY2_SNI}#Hysteria2-$(date +%m%d)"
+        SHARE_LINK="hysteria2://${HY2_PASSWORD}@${HY2_DOMAIN}:${HY2_PORT}?sni=${HY2_SNI}#${HY2_NAME}"
     else
-        SHARE_LINK="hysteria2://${HY2_PASSWORD}@${SERVER_IP}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#Hysteria2-$(date +%m%d)"
+        SHARE_LINK="hysteria2://${HY2_PASSWORD}@${SERVER_IP}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#${HY2_NAME}"
     fi
     echo "$SHARE_LINK" >> /root/hysteria2_info.txt
+
+    # Clash 节点片段
+    local CLASH_SERVER="$SERVER_IP" CLASH_SKIP="true"
+    if [[ "$CERT_MODE" == "2" ]]; then
+        CLASH_SERVER="$HY2_DOMAIN"; CLASH_SKIP="false"
+    fi
+    cat > /root/clash_hy2.part <<CEOF
+  - name: "${HY2_NAME}"
+    type: hysteria2
+    server: ${CLASH_SERVER}
+    port: ${HY2_PORT}
+    password: ${HY2_PASSWORD}
+    sni: ${HY2_SNI}
+    skip-cert-verify: ${CLASH_SKIP}
+    alpn:
+      - h3
+CEOF
 
     echo ""
     cat /root/hysteria2_info.txt
@@ -347,6 +388,47 @@ EOF
         info "扫码导入："
         qrencode -t ansiutf8 "$SHARE_LINK"
     fi
+}
+
+# ============================================================
+#  生成 Clash Verge (mihomo) 完整配置
+# ============================================================
+build_clash() {
+    local OUT=/root/clash_verge.yaml
+    local NAMES=()
+    [[ -f /root/clash_reality.part ]] && NAMES+=("$(grep -m1 'name:' /root/clash_reality.part | sed 's/.*name: //')")
+    [[ -f /root/clash_hy2.part ]]     && NAMES+=("$(grep -m1 'name:' /root/clash_hy2.part | sed 's/.*name: //')")
+    [[ ${#NAMES[@]} -eq 0 ]] && { warn "没有可用的节点信息"; return; }
+
+    {
+        echo "mixed-port: 7897"
+        echo "allow-lan: false"
+        echo "mode: rule"
+        echo "log-level: info"
+        echo "ipv6: false"
+        echo ""
+        echo "proxies:"
+        [[ -f /root/clash_reality.part ]] && cat /root/clash_reality.part
+        [[ -f /root/clash_hy2.part ]]     && cat /root/clash_hy2.part
+        echo ""
+        echo "proxy-groups:"
+        echo "  - name: \"节点选择\""
+        echo "    type: select"
+        echo "    proxies:"
+        for n in "${NAMES[@]}"; do echo "      - $n"; done
+        echo "      - DIRECT"
+        echo ""
+        echo "rules:"
+        echo "  - GEOIP,LAN,DIRECT"
+        echo "  - GEOIP,CN,DIRECT"
+        echo "  - MATCH,节点选择"
+    } > "$OUT"
+
+    echo ""
+    title "Clash Verge 配置 (保存于 $OUT)"
+    cat "$OUT"
+    echo ""
+    info "导入方法：Clash Verge → 订阅(Profiles) → 新建 → 类型选 Local → 编辑文件，粘贴以上内容保存并启用"
 }
 
 # ============================================================
@@ -378,7 +460,7 @@ show_menu() {
     clear
     echo -e "${BOLD}${BLUE}"
     echo "  ╔══════════════════════════════════════╗"
-    echo "  ║   Reality + Hysteria2 管理面板  v2    ║"
+    echo "  ║   Reality + Hysteria2 管理面板  v3    ║"
     echo "  ║   Debian 12 | $(date '+%Y-%m-%d')          ║"
     echo "  ╚══════════════════════════════════════╝"
     echo -e "${NC}"
@@ -390,6 +472,7 @@ show_menu() {
     echo -e "  ${GREEN}[6]${NC} 查看服务状态"
     echo -e "  ${GREEN}[7]${NC} 开启 BBR 加速"
     echo -e "  ${GREEN}[8]${NC} 卸载所有组件"
+    echo -e "  ${GREEN}[9]${NC} 查看 Clash Verge 配置"
     echo -e "  ${GREEN}[0]${NC} 退出"
     echo ""
 }
@@ -436,7 +519,7 @@ uninstall_all() {
     rm -f /etc/systemd/system/hysteria-server.service
     rm -f /etc/systemd/system/hysteria-server@.service
     systemctl daemon-reload
-    rm -f /root/reality_info.txt /root/hysteria2_info.txt
+    rm -f /root/reality_info.txt /root/hysteria2_info.txt /root/clash_*.part /root/clash_verge.yaml
     info "卸载完成"
 }
 
@@ -451,15 +534,17 @@ do_full_install() {
     install_hysteria2
     configure_hysteria2
     configure_firewall
+    build_clash
     info "全部安装完成！配置已保存至 /root/"
 }
 
 main() {
     case "$1" in
         install) do_full_install; exit 0 ;;
-        reality) install_deps; enable_bbr; install_xray; configure_reality; configure_firewall; exit 0 ;;
-        hy2)     install_deps; install_hysteria2; configure_hysteria2; configure_firewall; exit 0 ;;
+        reality) install_deps; enable_bbr; install_xray; configure_reality; configure_firewall; build_clash; exit 0 ;;
+        hy2)     install_deps; install_hysteria2; configure_hysteria2; configure_firewall; build_clash; exit 0 ;;
         bbr)     enable_bbr; exit 0 ;;
+        clash)   build_clash; exit 0 ;;
     esac
 
     while true; do
@@ -467,13 +552,14 @@ main() {
         read -rp "  请输入选项: " choice
         case "$choice" in
             1) do_full_install ;;
-            2) install_deps; enable_bbr; install_xray; configure_reality; configure_firewall ;;
-            3) install_deps; install_hysteria2; configure_hysteria2; configure_firewall ;;
+            2) install_deps; enable_bbr; install_xray; configure_reality; configure_firewall; build_clash ;;
+            3) install_deps; install_hysteria2; configure_hysteria2; configure_firewall; build_clash ;;
             4) view_info ;;
             5) restart_services ;;
             6) show_status ;;
             7) enable_bbr ;;
             8) uninstall_all ;;
+            9) build_clash ;;
             0) echo "退出"; exit 0 ;;
             *) warn "无效选项" ;;
         esac
