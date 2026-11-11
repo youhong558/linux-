@@ -240,25 +240,12 @@ configure_hysteria2() {
     read -rp "认证密码 [默认随机生成]: " HY2_PASSWORD
     [[ -z "$HY2_PASSWORD" ]] && HY2_PASSWORD=$(openssl rand -base64 16 | tr -d '=+/')
 
-    read -rp "混淆密码 (Salamander，回车不使用混淆): " HY2_OBFS
-
     echo ""
     echo "证书方式："
     echo "  1) 自签证书 (无需域名，推荐)"
     echo "  2) ACME 自动申请 (需要域名)"
     read -rp "选择 [1]: " CERT_MODE
     [[ -z "$CERT_MODE" ]] && CERT_MODE=1
-
-    # 混淆配置块（为空则不启用）
-    HY2_OBFS_BLOCK=""
-    if [[ -n "$HY2_OBFS" ]]; then
-        HY2_OBFS_BLOCK="
-obfs:
-  type: salamander
-  salamander:
-    password: ${HY2_OBFS}
-"
-    fi
 
     # ---- 步骤1: 先创建证书目录 ----
     mkdir -p "$HY2_CERT_DIR"
@@ -283,7 +270,7 @@ acme:
 auth:
   type: password
   password: ${HY2_PASSWORD}
-${HY2_OBFS_BLOCK}
+
 masquerade:
   type: proxy
   proxy:
@@ -320,7 +307,7 @@ tls:
 auth:
   type: password
   password: ${HY2_PASSWORD}
-${HY2_OBFS_BLOCK}
+
 masquerade:
   type: proxy
   proxy:
@@ -363,17 +350,14 @@ IP       : ${SERVER_IP}
 密码     : ${HY2_PASSWORD}
 SNI      : ${HY2_SNI}
 证书模式 : $( [[ "$CERT_MODE" == "2" ]] && echo "ACME域名" || echo "自签(insecure)" )
-混淆     : $( [[ -n "$HY2_OBFS" ]] && echo "salamander / ${HY2_OBFS}" || echo "未启用" )
 EOF
 
     local SHARE_LINK
     if [[ "$CERT_MODE" == "2" ]]; then
-        SHARE_LINK="hysteria2://${HY2_PASSWORD}@${HY2_DOMAIN}:${HY2_PORT}?sni=${HY2_SNI}"
+        SHARE_LINK="hysteria2://${HY2_PASSWORD}@${HY2_DOMAIN}:${HY2_PORT}?sni=${HY2_SNI}#${HY2_NAME}"
     else
-        SHARE_LINK="hysteria2://${HY2_PASSWORD}@${SERVER_IP}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}"
+        SHARE_LINK="hysteria2://${HY2_PASSWORD}@${SERVER_IP}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#${HY2_NAME}"
     fi
-    [[ -n "$HY2_OBFS" ]] && SHARE_LINK="${SHARE_LINK}&obfs=salamander&obfs-password=${HY2_OBFS}"
-    SHARE_LINK="${SHARE_LINK}#${HY2_NAME}"
     echo "$SHARE_LINK" >> /root/hysteria2_info.txt
 
     # Clash 节点片段
@@ -392,12 +376,6 @@ EOF
     alpn:
       - h3
 CEOF
-    if [[ -n "$HY2_OBFS" ]]; then
-        cat >> /root/clash_hy2.part <<CEOF
-    obfs: salamander
-    obfs-password: ${HY2_OBFS}
-CEOF
-    fi
 
     echo ""
     cat /root/hysteria2_info.txt
