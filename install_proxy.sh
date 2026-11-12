@@ -240,12 +240,25 @@ configure_hysteria2() {
     read -rp "认证密码 [默认随机生成]: " HY2_PASSWORD
     [[ -z "$HY2_PASSWORD" ]] && HY2_PASSWORD=$(openssl rand -base64 16 | tr -d '=+/')
 
+    read -rp "混淆密码 (Salamander，回车不使用混淆): " HY2_OBFS
+
     echo ""
     echo "证书方式："
     echo "  1) 自签证书 (无需域名，推荐)"
     echo "  2) ACME 自动申请 (需要域名)"
     read -rp "选择 [1]: " CERT_MODE
     [[ -z "$CERT_MODE" ]] && CERT_MODE=1
+
+    # 混淆配置块（为空则不启用）
+    HY2_OBFS_BLOCK=""
+    if [[ -n "$HY2_OBFS" ]]; then
+        HY2_OBFS_BLOCK="
+obfs:
+  type: salamander
+  salamander:
+    password: ${HY2_OBFS}
+"
+    fi
 
     # ---- 步骤1: 先创建证书目录 ----
     mkdir -p "$HY2_CERT_DIR"
@@ -270,7 +283,7 @@ acme:
 auth:
   type: password
   password: ${HY2_PASSWORD}
-
+${HY2_OBFS_BLOCK}
 masquerade:
   type: proxy
   proxy:
@@ -296,6 +309,10 @@ EOF
         [[ ! -f "${HY2_CERT_DIR}/cert.crt" ]] && error "证书生成失败"
         info "证书生成成功"
 
+        # 计算证书 SHA256 指纹（用于客户端证书固定，无需跳过验证）
+        HY2_PIN=$(openssl x509 -in "${HY2_CERT_DIR}/cert.crt" -noout -fingerprint -sha256 | cut -d= -f2)
+        HY2_PIN_RAW=$(echo "$HY2_PIN" | tr -d ':' | tr 'A-F' 'a-f')
+
         # ---- 步骤3: 写入配置（证书路径已确认存在）----
         cat > "$HY2_CONFIG" <<EOF
 listen: :${HY2_PORT}
@@ -307,7 +324,7 @@ tls:
 auth:
   type: password
   password: ${HY2_PASSWORD}
-
+${HY2_OBFS_BLOCK}
 masquerade:
   type: proxy
   proxy:
@@ -350,20 +367,26 @@ IP       : ${SERVER_IP}
 密码     : ${HY2_PASSWORD}
 SNI      : ${HY2_SNI}
 证书模式 : $( [[ "$CERT_MODE" == "2" ]] && echo "ACME域名" || echo "自签(insecure)" )
+证书指纹 : $( [[ "$CERT_MODE" == "2" ]] && echo "ACME证书无需固定" || echo "${HY2_PIN}" )
+混淆     : $( [[ -n "$HY2_OBFS" ]] && echo "salamander / ${HY2_OBFS}" || echo "未启用" )
 EOF
 
     local SHARE_LINK
     if [[ "$CERT_MODE" == "2" ]]; then
-        SHARE_LINK="hysteria2://${HY2_PASSWORD}@${HY2_DOMAIN}:${HY2_PORT}?sni=${HY2_SNI}#${HY2_NAME}"
+        SHARE_LINK="hysteria2://${HY2_PASSWORD}@${HY2_DOMAIN}:${HY2_PORT}?sni=${HY2_SNI}"
     else
-        SHARE_LINK="hysteria2://${HY2_PASSWORD}@${SERVER_IP}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#${HY2_NAME}"
+        SHARE_LINK="hysteria2://${HY2_PASSWORD}@${SERVER_IP}:${HY2_PORT}?sni=${HY2_SNI}&pinSHA256=${HY2_PIN}"
     fi
+    [[ -n "$HY2_OBFS" ]] && SHARE_LINK="${SHARE_LINK}&obfs=salamander&obfs-password=${HY2_OBFS}"
+    SHARE_LINK="${SHARE_LINK}#${HY2_NAME}"
     echo "$SHARE_LINK" >> /root/hysteria2_info.txt
 
     # Clash 节点片段
-    local CLASH_SERVER="$SERVER_IP" CLASH_SKIP="true"
+    local CLASH_SERVER="$SERVER_IP" CLASH_SKIP="false" CLASH_FP=""
     if [[ "$CERT_MODE" == "2" ]]; then
-        CLASH_SERVER="$HY2_DOMAIN"; CLASH_SKIP="false"
+        CLASH_SERVER="$HY2_DOMAIN"
+    else
+        CLASH_FP="    fingerprint: ${HY2_PIN_RAW}"
     fi
     cat > /root/clash_hy2.part <<CEOF
   - name: "${HY2_NAME}"
@@ -376,10 +399,18 @@ EOF
     alpn:
       - h3
 CEOF
+    [[ -n "$CLASH_FP" ]] && echo "$CLASH_FP" >> /root/clash_hy2.part
+    if [[ -n "$HY2_OBFS" ]]; then
+        cat >> /root/clash_hy2.part <<CEOF
+    obfs: salamander
+    obfs-password: ${HY2_OBFS}
+CEOF
+    fi
 
     echo ""
     cat /root/hysteria2_info.txt
     echo ""
+    [[ "$CERT_MODE" != "2" ]] && info "客户端无需开启「跳过证书验证」；若导入链接后不通，请在客户端「固定证书/指纹」处手动填入上面的证书指纹"
     info "分享链接："
     echo -e "${CYAN}${SHARE_LINK}${NC}"
 
